@@ -213,6 +213,95 @@ describe("tts", () => {
     });
   });
 
+  describe("resolveTtsConfig", () => {
+    const baseCfg: OpenClawConfig = {
+      agents: { defaults: { model: { primary: "openai/gpt-4o-mini" } } },
+      messages: { tts: {} },
+    };
+
+    it("resolves openai.instructions from config", () => {
+      const cfg: OpenClawConfig = {
+        ...baseCfg,
+        messages: {
+          tts: {
+            openai: { instructions: "Speak in a calm, soothing voice" },
+          },
+        },
+      };
+      const config = resolveTtsConfig(cfg);
+      expect(config.openai.instructions).toBe("Speak in a calm, soothing voice");
+    });
+
+    it("trims whitespace from instructions", () => {
+      const cfg: OpenClawConfig = {
+        ...baseCfg,
+        messages: {
+          tts: {
+            openai: { instructions: "  Speak slowly  " },
+          },
+        },
+      };
+      const config = resolveTtsConfig(cfg);
+      expect(config.openai.instructions).toBe("Speak slowly");
+    });
+
+    it("resolves instructions to undefined when not configured", () => {
+      const config = resolveTtsConfig(baseCfg);
+      expect(config.openai.instructions).toBeUndefined();
+    });
+
+    it("resolves instructions to undefined for empty string", () => {
+      const cfg: OpenClawConfig = {
+        ...baseCfg,
+        messages: {
+          tts: {
+            openai: { instructions: "" },
+          },
+        },
+      };
+      const config = resolveTtsConfig(cfg);
+      expect(config.openai.instructions).toBeUndefined();
+    });
+
+    it("resolves instructions to undefined for whitespace-only string", () => {
+      const cfg: OpenClawConfig = {
+        ...baseCfg,
+        messages: {
+          tts: {
+            openai: { instructions: "   " },
+          },
+        },
+      };
+      const config = resolveTtsConfig(cfg);
+      expect(config.openai.instructions).toBeUndefined();
+    });
+  });
+
+  describe("resolveModelOverridePolicy", () => {
+    it("defaults allowInstructions to true when enabled", () => {
+      const policy = resolveModelOverridePolicy({ enabled: true });
+      expect(policy.allowInstructions).toBe(true);
+    });
+
+    it("sets allowInstructions to false when overrides are disabled", () => {
+      const policy = resolveModelOverridePolicy({ enabled: false });
+      expect(policy.allowInstructions).toBe(false);
+    });
+
+    it("respects explicit allowInstructions value", () => {
+      const policy = resolveModelOverridePolicy({
+        enabled: true,
+        allowInstructions: false,
+      });
+      expect(policy.allowInstructions).toBe(false);
+    });
+
+    it("defaults allowInstructions to true when config is undefined", () => {
+      const policy = resolveModelOverridePolicy(undefined);
+      expect(policy.allowInstructions).toBe(true);
+    });
+  });
+
   describe("parseTtsDirectives", () => {
     it("extracts overrides and strips directives when enabled", () => {
       const policy = resolveModelOverridePolicy({ enabled: true });
@@ -244,6 +333,16 @@ describe("tts", () => {
 
       expect(result.cleanedText).toBe(input);
       expect(result.overrides.provider).toBeUndefined();
+    });
+
+    it("does not parse instructions from directives (multi-word limitation)", () => {
+      const policy = resolveModelOverridePolicy({ enabled: true });
+      const input = "Hello [[tts:instructions=Speak slowly and calmly]] world";
+      const result = parseTtsDirectives(input, policy);
+
+      // Instructions directive is intentionally not supported in parser
+      // because whitespace splitting truncates multi-word values
+      expect(result.overrides.openai?.instructions).toBeUndefined();
     });
   });
 
@@ -544,6 +643,40 @@ describe("tts", () => {
 
         expect(result.mediaUrl).toBeDefined();
         expect(fetchMock).toHaveBeenCalledTimes(1);
+      });
+    });
+
+    it("passes openai.instructions to the TTS API request", async () => {
+      const cfgWithInstructions: OpenClawConfig = {
+        ...baseCfg,
+        messages: {
+          ...baseCfg.messages!,
+          tts: {
+            ...baseCfg.messages!.tts,
+            auto: "inbound",
+            openai: {
+              ...baseCfg.messages!.tts!.openai,
+              apiKey: "test-key",
+              model: "gpt-4o-mini-tts",
+              voice: "alloy",
+              instructions: "Speak in a cheerful tone",
+            },
+          },
+        },
+      };
+
+      await withMockedAutoTtsFetch(async (fetchMock) => {
+        await maybeApplyTtsToPayload({
+          payload: { text: "Hello world, this is a test message" },
+          cfg: cfgWithInstructions,
+          kind: "final",
+          inboundAudio: true,
+        });
+
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+        const [, options] = fetchMock.mock.calls[0] as [string, RequestInit];
+        const body = JSON.parse(options.body as string);
+        expect(body.instructions).toBe("Speak in a cheerful tone");
       });
     });
   });
